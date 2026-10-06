@@ -1,0 +1,6 @@
+{
+  "name": "Cloudflare Ready AI Backend API",
+  "description": "Stateless, multi-model AI API backend with Gemini integration, intelligent query routing, automatic fallback, and Cloudflare Worker readiness.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

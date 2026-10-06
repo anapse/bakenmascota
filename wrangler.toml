@@ -1,0 +1,12 @@
+# Cloudflare Workers Configuration for AI Backend API
+name = "ai-backend-api"
+main = "worker/index.ts"
+compatibility_date = "2024-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# Secrets to configure in Cloudflare (via `npx wrangler secret put GEMINI_API_KEY` or Cloudflare Dashboard):
+# - GEMINI_API_KEY = "your-gemini-api-key"
+# - API_SECRET_KEY = "optional-secret-to-restrict-access"
