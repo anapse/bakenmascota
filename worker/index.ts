@@ -30,7 +30,7 @@ export interface ChatRequestBody {
 }
 
 // Allowed models allowlist (Backend-governed)
-const ECONOMIC_FAST_MODEL = 'gemini-3.1-flash-lite';
+const ECONOMIC_FAST_MODEL = 'gemini-3.5-flash-lite';
 const HIGHER_REASONING_MODEL = 'gemini-3.8-flash';
 const ALLOWED_MODELS = [ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL];
 
@@ -48,7 +48,7 @@ const MAX_MESSAGE_CONTENT_LENGTH = 4000;
 const MAX_SYSTEM_INSTRUCTION_LENGTH = 2000;
 const DEFAULT_MAX_TOKENS = 800;
 const MAX_MAX_TOKENS = 2048;
-const REQUEST_TIMEOUT_MS = 20000; // 20s timeout
+const REQUEST_TIMEOUT_MS = 25000; // 25s timeout
 
 /**
  * Resolves the list of allowed CORS origins from configuration and defaults.
