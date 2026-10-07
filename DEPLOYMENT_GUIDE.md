@@ -1,186 +1,108 @@
-# Guía de Despliegue en Cloudflare Workers y Conexión de API
+# Guía de Despliegue en Cloudflare Workers y Conexión con Mascoticas IA
 
-Este proyecto contiene un backend API de Inteligencia Artificial independiente, stateless y con alta disponibilidad, preparado para ser desplegado en **Cloudflare Workers**.
+Backend de Inteligencia Artificial independiente, stateless y optimizado en costes para alimentar aplicaciones estáticas en **GitHub Pages** (como `https://anapse.github.io/MascoticasIA/`) y otras aplicaciones de ANAPSE.
 
 ---
 
-## 📁 Archivos Clave del Proyecto
-
-Si deseas exportar este backend fuera de Google AI Studio, estos son los archivos esenciales:
+## 📁 Archivos Clave del Repositorio
 
 | Archivo | Propósito |
 | :--- | :--- |
-| **`worker/index.ts`** | Código principal del Worker (API estándar Edge Fetch, enrutamiento, fallback, CORS, Gemini REST). |
-| **`wrangler.toml`** | Archivo de configuración de Cloudflare Workers. |
-| **`package.json`** | Dependencias y scripts del proyecto. |
-| **`server.ts`** | Servidor Node.js / Express local para pruebas en desarrollo. |
-| **`src/ai/*`** | Módulos desacoplados de proveedores, enrutador inteligente y tipos. |
-
-> **Nota:** Para desplegar en Cloudflare Workers, **solo necesitas `worker/index.ts` y `wrangler.toml`** (o simplemente copiar el contenido de `worker/index.ts` en el editor del Dashboard de Cloudflare).
+| **`worker/index.ts`** | Código principal del Worker para el Edge de Cloudflare (Fetch API nativo, CORS por lista blanca, enrutamiento económico, fallback y límites anti-abuso). |
+| **`wrangler.toml`** | Configuración de despliegue para Wrangler de Cloudflare. |
+| **`server.ts`** | Servidor local Express para pruebas durante el desarrollo. |
+| **`src/ai/*`** | Lógica modular de enrutador, proveedores y tipos. |
 
 ---
 
-## 🚀 Cómo desplegar en Cloudflare Workers
+## 🚀 Pasos para Desplegar en Cloudflare Workers
 
-Tienes **dos métodos sencillos**:
+### 1. Iniciar sesión en Cloudflare (desde tu terminal local)
+```bash
+npx wrangler login
+```
 
-### Opción A: Usando Wrangler CLI (Recomendado)
+### 2. Configurar la API Key de Gemini como Secreto seguro
+*(Cloudflare encripta el secreto para que nunca sea visible en el código ni en el cliente)*:
+```bash
+npx wrangler secret put GEMINI_API_KEY
+```
+> Escribe o pega tu clave de Google Gemini cuando te lo pida en la terminal.
 
-1. **Instala Wrangler** (si no lo tienes):
-   ```bash
-   npm install -g wrangler
-   # o usa npx wrangler directamente
-   ```
+*(Opcional: Si quieres proteger el acceso con un token secreto adicional)*:
+```bash
+npx wrangler secret put API_SECRET_KEY
+```
 
-2. **Inicia sesión en Cloudflare**:
-   ```bash
-   npx wrangler login
-   ```
-
-3. **Configura tu API Key de Gemini como Secreto seguro**:
-   ```bash
-   npx wrangler secret put GEMINI_API_KEY
-   # Introduce tu clave de Gemini cuando te lo solicite en la terminal
-   ```
-
-4. **(Opcional) Configura token de acceso o CORS**:
-   ```bash
-   # Si deseas restringir qué origen puede conectarse (por defecto '*'):
-   npx wrangler secret put ALLOWED_ORIGIN
-   ```
-
-5. **Despliega el Worker**:
-   ```bash
-   npx wrangler deploy
-   ```
+### 3. Desplegar el Worker
+```bash
+npx wrangler deploy
+```
 
 Cloudflare te devolverá la URL pública de tu API, por ejemplo:
 `https://ai-backend-api.<tu-subdominio>.workers.dev`
 
 ---
 
-### Opción B: Desde el Panel Web de Cloudflare (Sin terminal)
+## 🔒 Configuración de CORS y Seguridad
 
-1. Entra en tu panel de **Cloudflare Dashboard** > **Workers & Pages** > **Create application** > **Create Worker**.
-2. Asigna un nombre al Worker (ejemplo: `ai-backend-api`) y haz clic en **Deploy**.
-3. Haz clic en **Edit code** y reemplaza todo el contenido con el código de `worker/index.ts`. Guarda y despliega.
-4. Ve a la pestaña **Settings** > **Variables and Secrets**:
-   - Haz clic en **Add**
-   - Nombre: `GEMINI_API_KEY`
-   - Valor: tu clave de Gemini
-   - Tipo: **Secret** (Encriptado)
-   - Guarda los cambios.
+Por defecto en `wrangler.toml`, las peticiones solo se aceptan desde los siguientes orígenes:
+- `https://anapse.github.io` *(GitHub Pages / Mascoticas IA)*
+- `http://localhost:3000` *(Desarrollo local)*
+- `http://localhost:5173` *(Desarrollo local)*
 
 ---
 
-## 📡 Endpoints Disponibles
+## 💰 Optimización de Costes y Enrutamiento Inteligente
 
-### 1. `GET /api/health`
-Verifica el estado del servicio y configuración de los proveedores.
+- **Modelo económico por defecto:** Utiliza **`gemini-3.1-flash-lite`** para saludos, preguntas sencillas, definiciones, diálogos de mascotas y consultas generales.
+- **Modelo superior:** Solo pasa automáticamente a **`gemini-3.8-flash`** para tareas que realmente requieren código avanzado, matemáticas o razonamiento complejo.
+- **Control del backend:** El cliente no puede obligar al backend a usar modelos caros para consultas simples.
+- **Fallback de alta disponibilidad:** Si el modelo económico experimenta congestión o fallo temporal, reintenta automáticamente con el modelo secundario sin interrumpir la experiencia del usuario.
 
-**Ejemplo de Respuesta (200 OK):**
-```json
-{
-  "status": "ok",
-  "service": "cloudflare-worker-ai-api",
-  "version": "1.0.0",
-  "timestamp": "2026-10-06T17:00:00.000Z",
-  "environment": "cloudflare-worker",
-  "providers": {
-    "gemini": {
-      "configured": true,
-      "defaultModel": "gemini-3.8-flash",
-      "fallbackModel": "gemini-3.1-flash-lite"
+---
+
+## 🔌 Cómo conectar tu aplicación en GitHub Pages (Mascoticas IA)
+
+En tu aplicación estática alojada en GitHub Pages, solo debes hacer una llamada HTTP `POST` al endpoint `/api/chat` de tu Worker:
+
+```javascript
+// URL de tu Cloudflare Worker desplegado
+const AI_BACKEND_URL = "https://ai-backend-api.<tu-subdominio>.workers.dev";
+
+async function consultarMascotaIA(preguntaUsuario, personalidadMascota) {
+  try {
+    const response = await fetch(`${AI_BACKEND_URL}/api/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: preguntaUsuario,
+        systemInstruction: personalidadMascota || "Eres una simpática mascota virtual que responde de forma alegre y breve.",
+        taskType: "auto", // El backend detecta automáticamente y usa el modelo más económico
+        temperature: 0.7,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || "Error al comunicar con la IA");
     }
-  },
-  "supportedModels": ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"],
-  "supportedTaskTypes": ["auto", "general", "coding", "complex_reasoning", "fast_qa", "creative", "math"]
-}
-```
 
----
-
-### 2. `POST /api/chat`
-Procesa preguntas de IA con enrutamiento inteligente y fallback automático.
-
-**Cuerpo de la Petición (JSON):**
-```json
-{
-  "prompt": "¿Cómo optimizar una consulta en PostgreSQL?",
-  "systemInstruction": "Eres un arquitecto de bases de datos senior.",
-  "taskType": "auto",
-  "model": "auto",
-  "temperature": 0.7
-}
-```
-
-*Opcionalmente también acepta historial de conversación:*
-```json
-{
-  "messages": [
-    { "role": "user", "content": "Hola" },
-    { "role": "assistant", "content": "¡Hola! ¿En qué puedo ayudarte?" },
-    { "role": "user", "content": "Explícame qué es CORS" }
-  ],
-  "taskType": "coding"
-}
-```
-
-**Respuesta Exitosa (200 OK):**
-```json
-{
-  "success": true,
-  "text": "CORS (Cross-Origin Resource Sharing) es un mecanismo...",
-  "metadata": {
-    "provider": "gemini",
-    "model": "gemini-3.8-flash",
-    "taskType": "coding",
-    "fallbackTriggered": false,
-    "latencyMs": 420,
-    "timestamp": "2026-10-06T17:00:01.000Z"
+    const data = await response.json();
+    return data.text; // Texto generado para la mascota
+  } catch (err) {
+    console.error("Error consultando IA:", err);
+    return "¡Ups! En este momento no puedo responder, inténtalo de nuevo en unos segundos.";
   }
 }
 ```
 
 ---
 
-## 🔌 Cómo conectar tu OTRA aplicación a este Backend
+## 📡 Resumen de Endpoints del Worker
 
-En tu otra aplicación existente, solo debes hacer una llamada HTTP `POST` a la URL del Worker:
-
-### En JavaScript / TypeScript (Frontend o Backend):
-
-```typescript
-const CLOUDFLARE_WORKER_URL = 'https://ai-backend-api.<tu-subdominio>.workers.dev';
-
-async function askAI(userPrompt: string) {
-  const response = await fetch(`${CLOUDFLARE_WORKER_URL}/api/chat`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      prompt: userPrompt,
-      taskType: 'auto', // 'auto' clasifica la pregunta para elegir el modelo óptimo
-    }),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.error || 'Error en la respuesta de la IA');
-  }
-
-  const data = await response.json();
-  return data.text; // Texto generado por el modelo
-}
-```
-
----
-
-## 🛡️ Características Implementadas
-
-- **Sin Estado (Stateless):** No guarda conversaciones ni en base de datos ni en memoria persistente.
-- **Enrutamiento Inteligente:** Clasifica automáticamente la intención de la pregunta (`coding`, `math`, `complex_reasoning`, `fast_qa`, `creative`) y selecciona el modelo óptimo (`gemini-3.8-flash` o `gemini-3.1-flash-lite`).
-- **Fallback de Alta Disponibilidad:** Si el modelo principal experimenta cualquier fallo o límite, el backend reintenta automáticamente con el modelo secundario de respaldo sin interrumpir al usuario.
-- **CORS Habilitado:** Permite llamadas desde cualquier dominio o el dominio específico que configures en `ALLOWED_ORIGIN`.
-- **Preparado para Múltiples Proveedores:** Arquitectura modular lista para añadir OpenAI, Groq, Anthropic o Cloudflare Workers AI.
+- **`GET /api/health`**: Comprueba si el worker está vivo y si la API Key está configurada (no requiere autenticación).
+- **`GET /api/models`**: Lista los modelos gobernados por el backend (`gemini-3.1-flash-lite` y `gemini-3.8-flash`).
+- **`POST /api/chat`**: Genera respuestas con límites de seguridad y fallback automático.

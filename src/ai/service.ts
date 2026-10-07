@@ -1,8 +1,7 @@
 import { GeminiProvider } from './providers/gemini.ts';
 import { OpenAICompatibleProvider } from './providers/openai-compatible.ts';
 import { CloudflareWorkersAIProvider } from './providers/workers-ai.ts';
-import { IAIProvider } from './providers/types.ts';
-import { resolveModelRoute } from './router.ts';
+import { resolveModelRoute, ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL } from './router.ts';
 import {
   ChatMessage,
   ChatRequestBody,
@@ -42,26 +41,41 @@ export class AIService {
 
   /**
    * Main chat processing pipeline with intelligent model routing and automatic fallback.
-   * Completely stateless.
+   * Completely stateless and cost-optimized.
    */
   public async handleChat(body: ChatRequestBody): Promise<ChatResponseBody> {
     const overallStartTime = Date.now();
 
-    // Normalize messages
+    // Input validation & limits
     const messages: ChatMessage[] = [];
     if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) {
-      messages.push(...body.messages);
-    } else if (body.prompt && body.prompt.trim()) {
+      if (body.messages.length > 10) {
+        throw new Error('Exceeded maximum message count of 10.');
+      }
+      for (const m of body.messages) {
+        if (!m || typeof m.content !== 'string' || !m.content.trim()) continue;
+        if (m.content.length > 4000) {
+          throw new Error('Message content exceeds 4000 characters limit.');
+        }
+        messages.push({
+          role: m.role === 'assistant' || m.role === 'model' ? 'model' : 'user',
+          content: m.content.trim(),
+        });
+      }
+    } else if (body.prompt && typeof body.prompt === 'string' && body.prompt.trim()) {
+      if (body.prompt.length > 4000) {
+        throw new Error('Prompt length exceeds 4000 characters limit.');
+      }
       messages.push({ role: 'user', content: body.prompt.trim() });
     } else {
       throw new Error('Missing prompt or messages array in request body.');
     }
 
     // Extract latest user text for intelligent routing
-    const latestUserPrompt = [...messages].reverse().find((m) => m.role === 'user')?.content || body.prompt || '';
+    const latestUserPrompt = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
 
-    // Route query to optimal model
-    const route = resolveModelRoute(body.model, body.taskType, latestUserPrompt);
+    // Backend-governed route decision
+    const route = resolveModelRoute(body.taskType, latestUserPrompt);
     const primaryModel: ModelName = route.primaryModel;
     const fallbackModel: ModelName = route.fallbackModel;
 
@@ -71,7 +85,7 @@ export class AIService {
     let finalModelUsed = primaryModel;
     let finalProviderUsed = 'gemini';
 
-    // Step 1: Attempt generation with Primary Model
+    // Step 1: Attempt generation with Primary Model (Economic by default)
     try {
       const result = await this.geminiProvider.generate({
         model: primaryModel,
@@ -160,15 +174,15 @@ export class AIService {
     return {
       status: this.geminiProvider.isConfigured() ? 'ok' : 'degraded',
       service: 'ai-backend-api',
-      version: '1.0.0',
+      version: '1.1.0',
       timestamp: new Date().toISOString(),
       uptimeSeconds,
       environment: this.environment,
       providers: {
         gemini: {
           configured: this.geminiProvider.isConfigured(),
-          defaultModel: 'gemini-3.8-flash',
-          fallbackModel: 'gemini-3.1-flash-lite',
+          defaultModel: ECONOMIC_FAST_MODEL,
+          fallbackModel: HIGHER_REASONING_MODEL,
         },
         openaiCompatible: {
           configured: this.openaiProvider.isConfigured(),
@@ -177,19 +191,15 @@ export class AIService {
           configured: this.workersAiProvider.isConfigured(),
         },
       },
-      supportedModels: [
-        'gemini-3.8-flash',
-        'gemini-3.1-flash-lite',
-        'gemini-3.1-pro-preview',
-      ],
+      supportedModels: [ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL],
       supportedTaskTypes: [
         'auto',
+        'fast_qa',
         'general',
         'coding',
         'complex_reasoning',
-        'fast_qa',
-        'creative',
         'math',
+        'creative',
       ],
     };
   }

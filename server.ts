@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { AIService } from './src/ai/service.ts';
+import { ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL } from './src/ai/router.ts';
 import { ChatRequestBody } from './src/ai/types.ts';
 
 dotenv.config();
@@ -24,24 +25,70 @@ const aiService = new AIService({
   environment: 'express',
 });
 
-// Setup CORS - Allows the other application to connect seamlessly
-const allowedOrigins = process.env.ALLOWED_ORIGIN ? process.env.ALLOWED_ORIGIN.split(',') : '*';
+// Setup CORS Origin Validator
+const customOrigins = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+function checkOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return true; // Server-to-server, curl, mobile apps
+  if (customOrigins.includes('*')) return true;
+
+  // Custom environment origins
+  if (customOrigins.some((allowed) => origin === allowed || origin.startsWith(allowed))) {
+    return true;
+  }
+
+  // Default allowed origins for GitHub Pages, Local dev, and AI Studio
+  const isAllowedHost =
+    origin.startsWith('https://anapse.github.io') ||
+    origin.endsWith('.github.io') ||
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+    origin.endsWith('.run.app') ||
+    (process.env.APP_URL && origin.startsWith(process.env.APP_URL));
+
+  return Boolean(isAllowedHost);
+}
+
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      const allowed = checkOriginAllowed(origin);
+      // Passing callback(null, allowed) avoids uncaught error crashes in Express
+      callback(null, allowed);
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-app-token', 'User-Agent'],
     credentials: true,
   })
 );
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '2mb' }));
+
+// Optional API Secret validation middleware
+const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const secretKey = process.env.API_SECRET_KEY;
+  if (!secretKey) return next();
+
+  const authHeader = req.headers.authorization;
+  const apiKeyHeader = req.headers['x-api-key'];
+  const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : apiKeyHeader;
+
+  if (!token || token !== secretKey.trim()) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized: Invalid or missing API secret token.',
+    });
+  }
+  next();
+};
 
 // --- API ENDPOINTS ---
 
 /**
  * Health Check Endpoint
- * GET /api/health
+ * GET /api/health (Always public)
  */
 app.get('/api/health', (_req: Request, res: Response) => {
   const health = aiService.getHealth();
@@ -50,9 +97,9 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 /**
  * Chat & AI Generation Endpoint
- * POST /api/chat
+ * POST /api/chat (Protected if API_SECRET_KEY configured)
  */
-app.post('/api/chat', async (req: Request, res: Response) => {
+app.post('/api/chat', authMiddleware, async (req: Request, res: Response) => {
   try {
     const body = req.body as ChatRequestBody;
 
@@ -81,38 +128,23 @@ app.post('/api/chat', async (req: Request, res: Response) => {
  */
 app.get('/api/models', (_req: Request, res: Response) => {
   res.json({
-    primaryProvider: 'gemini',
-    defaultModel: 'gemini-3.8-flash',
-    fallbackModel: 'gemini-3.1-flash-lite',
+    defaultModel: ECONOMIC_FAST_MODEL,
+    higherModel: HIGHER_REASONING_MODEL,
     availableModels: [
       {
-        id: 'gemini-3.8-flash',
-        name: 'Gemini 3.8 Flash',
-        description: 'High-speed, top reasoning model for general text, math, code and analysis.',
-        recommendedFor: ['general', 'coding', 'complex_reasoning', 'math', 'creative'],
-      },
-      {
-        id: 'gemini-3.1-flash-lite',
+        id: ECONOMIC_FAST_MODEL,
         name: 'Gemini 3.1 Flash Lite',
-        description: 'Ultra-low latency, cost-effective model used for fast Q&A and default fallback.',
-        recommendedFor: ['fast_qa', 'fallback'],
+        role: 'Default Economic Model',
+        description: 'Ultra-fast, cost-effective model used for general questions, demos, and simple Q&A.',
       },
       {
-        id: 'gemini-3.1-pro-preview',
-        name: 'Gemini 3.1 Pro Preview',
-        description: 'Deep reasoning model for high-complexity analytical tasks.',
-        recommendedFor: ['complex_reasoning', 'advanced_stem'],
+        id: HIGHER_REASONING_MODEL,
+        name: 'Gemini 3.8 Flash',
+        role: 'Higher Reasoning Model',
+        description: 'Activated for coding queries, math, or complex analytical reasoning.',
       },
     ],
-    taskTypes: [
-      { id: 'auto', description: 'Intelligently analyzes query text to pick the best model automatically' },
-      { id: 'general', description: 'Standard general purpose text generation' },
-      { id: 'coding', description: 'Code generation, debugging, refactoring, algorithms' },
-      { id: 'complex_reasoning', description: 'Deep reasoning, multi-step analysis, logic' },
-      { id: 'fast_qa', description: 'Rapid answers, definitions, translations' },
-      { id: 'creative', description: 'Writing, drafting, storytelling' },
-      { id: 'math', description: 'Mathematical reasoning, equations, calculations' },
-    ],
+    routingMode: 'backend-governed',
   });
 });
 

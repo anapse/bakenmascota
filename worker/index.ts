@@ -1,16 +1,17 @@
 /**
  * Cloudflare Worker Entrypoint: AI Backend API
  *
- * Deployable directly to Cloudflare Workers via Wrangler or the Cloudflare Dashboard.
- * Completely stateless, high-performance, edge-ready AI proxy with intelligent model routing and automatic fallback.
+ * Designed as a secure, stateless, cost-optimized AI bridge for static applications
+ * hosted on GitHub Pages (e.g., https://anapse.github.io/MascoticasIA/) and local dev.
  */
 
 export interface Env {
   GEMINI_API_KEY?: string;
+  ALLOWED_ORIGINS?: string;
   ALLOWED_ORIGIN?: string;
+  API_SECRET_KEY?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
-  API_SECRET_KEY?: string; // Optional secret token if you want to restrict calls from your other app
 }
 
 export interface ChatMessage {
@@ -22,20 +23,77 @@ export interface ChatRequestBody {
   prompt?: string;
   messages?: ChatMessage[];
   systemInstruction?: string;
+  taskType?: 'auto' | 'fast_qa' | 'general' | 'coding' | 'complex_reasoning' | 'math' | 'creative';
   model?: string;
-  taskType?: 'auto' | 'general' | 'coding' | 'complex_reasoning' | 'fast_qa' | 'creative' | 'math';
   temperature?: number;
   maxTokens?: number;
 }
 
-// Helper: Add CORS headers to any Response
-function corsResponse(response: Response, env: Env, reqOrigin?: string | null): Response {
-  const allowed = env.ALLOWED_ORIGIN || reqOrigin || '*';
+// Allowed models allowlist (Backend-governed)
+const ECONOMIC_FAST_MODEL = 'gemini-3.1-flash-lite';
+const HIGHER_REASONING_MODEL = 'gemini-3.8-flash';
+const ALLOWED_MODELS = [ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL];
+
+// Default allowed origins for GitHub Pages and local development
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://anapse.github.io',
+  'http://localhost:3000',
+  'http://localhost:5173',
+];
+
+// Abuse limits
+const MAX_PROMPT_LENGTH = 4000;
+const MAX_MESSAGES_COUNT = 10;
+const MAX_MESSAGE_CONTENT_LENGTH = 4000;
+const MAX_SYSTEM_INSTRUCTION_LENGTH = 2000;
+const DEFAULT_MAX_TOKENS = 800;
+const MAX_MAX_TOKENS = 2048;
+const REQUEST_TIMEOUT_MS = 20000; // 20s timeout
+
+/**
+ * Resolves the list of allowed CORS origins from configuration and defaults.
+ */
+function getAllowedOrigins(env: Env): string[] {
+  const customOrigins = env.ALLOWED_ORIGINS || env.ALLOWED_ORIGIN;
+  if (!customOrigins) {
+    return DEFAULT_ALLOWED_ORIGINS;
+  }
+  const parsed = customOrigins.split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+  return parsed.length > 0 ? parsed : DEFAULT_ALLOWED_ORIGINS;
+}
+
+/**
+ * Checks if the request origin matches allowed origins.
+ */
+function isOriginAllowed(origin: string | null, allowedList: string[]): boolean {
+  if (!origin) return true;
+  const normalized = origin.trim().replace(/\/+$/, '');
+  return allowedList.some((allowed) => {
+    if (allowed === '*') return true;
+    if (normalized.startsWith('https://anapse.github.io') || normalized.endsWith('.github.io')) return true;
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalized)) return true;
+    return normalized === allowed || normalized.startsWith(allowed);
+  });
+}
+
+/**
+ * Adds CORS headers to a Response object based on the incoming request Origin.
+ */
+function applyCors(response: Response, env: Env, reqOrigin?: string | null): Response {
+  const allowedList = getAllowedOrigins(env);
   const newHeaders = new Headers(response.headers);
-  newHeaders.set('Access-Control-Allow-Origin', allowed === '*' ? '*' : reqOrigin || allowed);
+
+  if (reqOrigin && isOriginAllowed(reqOrigin, allowedList)) {
+    newHeaders.set('Access-Control-Allow-Origin', reqOrigin);
+    newHeaders.set('Vary', 'Origin');
+  } else if (allowedList.includes('*')) {
+    newHeaders.set('Access-Control-Allow-Origin', '*');
+  }
+
   newHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
-  newHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-app-token, User-Agent');
+  newHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-app-token');
   newHeaders.set('Access-Control-Max-Age', '86400');
+
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -43,42 +101,64 @@ function corsResponse(response: Response, env: Env, reqOrigin?: string | null): 
   });
 }
 
-// Helper: JSON response with CORS
+/**
+ * Helper to build JSON responses with CORS headers.
+ */
 function jsonResponse(data: unknown, status = 200, env: Env, reqOrigin?: string | null): Response {
   const res = new Response(JSON.stringify(data, null, 2), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
-  return corsResponse(res, env, reqOrigin);
+  return applyCors(res, env, reqOrigin);
 }
 
-// Prompt Classifier for Intelligent Model Routing
-function classifyPrompt(prompt: string): string {
+/**
+ * Prompt Classifier for Cost-Controlled Intelligent Routing.
+ * Prioritizes the economical/fast model for simple demos, greetings, general questions, and definitions.
+ */
+function classifyPrompt(prompt: string): 'fast_qa' | 'general' | 'coding' | 'complex_reasoning' | 'math' | 'creative' {
   const text = prompt.toLowerCase().trim();
 
-  if (text.length < 80 && (
-    text.startsWith('what is ') ||
-    text.startsWith('define ') ||
-    text.startsWith('sinónimo de ') ||
-    text.startsWith('significado de ') ||
-    text.startsWith('capital of ') ||
-    text.startsWith('translate ') ||
-    text.startsWith('traduce ') ||
-    /^(yes|no|si|no)\??$/i.test(text)
-  )) {
+  // Greetings, short chit-chat, simple queries (< 100 chars) -> fast_qa (economic)
+  if (
+    text.length < 100 &&
+    (text.startsWith('hola') ||
+      text.startsWith('hey') ||
+      text.startsWith('hello') ||
+      text.startsWith('buenos días') ||
+      text.startsWith('buenas') ||
+      text.startsWith('qué tal') ||
+      text.startsWith('que tal') ||
+      text.startsWith('cómo estás') ||
+      text.startsWith('como estas') ||
+      text.startsWith('qué eres') ||
+      text.startsWith('que eres') ||
+      text.startsWith('quién eres') ||
+      text.startsWith('quien eres') ||
+      text.startsWith('what is ') ||
+      text.startsWith('define ') ||
+      text.startsWith('sinónimo') ||
+      text.startsWith('significado') ||
+      text.startsWith('capital de') ||
+      text.startsWith('traduce') ||
+      text.startsWith('translate') ||
+      /^(si|no|yes|no|ok|vale|bien|gracias)\b/i.test(text))
+  ) {
     return 'fast_qa';
   }
 
+  // Coding patterns
   const codePatterns = [
     /\b(function|const|let|var|class|import|export|interface|type|def |return|async|await)\b/,
     /\b(javascript|typescript|python|rust|golang|c\+\+|sql|postgres|mysql|html|css|json|yaml)\b/,
     /\b(bug|error|exception|stacktrace|refactor|compile|regex|algorithm|api|endpoint|git|docker)\b/,
-    /[{};<>\[\]=_]{3,}/,
+    /[{};<>\[\]=_]{4,}/,
   ];
   for (const pattern of codePatterns) {
     if (pattern.test(text)) return 'coding';
   }
 
+  // Math calculation patterns
   const mathPatterns = [
     /\b(calculate|solve|equation|integral|derivative|matrix|vector|probability|statistic|logarithm)\b/,
     /\b(calcula|resuelve|ecuación|derivada|integral|matriz|probabilidad|estadística)\b/,
@@ -88,18 +168,19 @@ function classifyPrompt(prompt: string): string {
     if (pattern.test(text)) return 'math';
   }
 
+  // Deep reasoning patterns
   const reasoningPatterns = [
-    /\b(analyze|compare|contrast|step by step|proof|theorem|implication|architectural|pros and cons)\b/,
-    /\b(analiza|compara|contrasta|paso a paso|demostración|teorema|pros y contras|profundidad)\b/,
-    /\b(why does|how come|explain in detail|explica en detalle)\b/,
+    /\b(analyze in depth|compare and contrast|step by step proof|mathematical theorem|architectural trade-offs)\b/,
+    /\b(analiza en profundidad|demostración paso a paso|teorema|pros y contras exhaustivos)\b/,
   ];
   for (const pattern of reasoningPatterns) {
     if (pattern.test(text)) return 'complex_reasoning';
   }
 
+  // Creative writing
   const creativePatterns = [
-    /\b(write a story|poem|essay|draft|compose|creative|fiction|roleplay|script|blog post)\b/,
-    /\b(escribe una historia|poema|ensayo|redacta|guion|novela|cuento|canción)\b/,
+    /\b(write a story|poem|essay|compose|fiction|roleplay|script)\b/,
+    /\b(escribe una historia|poema|ensayo|cuento|canción|novela|guion)\b/,
   ];
   for (const pattern of creativePatterns) {
     if (pattern.test(text)) return 'creative';
@@ -108,51 +189,73 @@ function classifyPrompt(prompt: string): string {
   return 'general';
 }
 
-function routeModel(requestedModel?: string, requestedTaskType?: string, promptText: string = ''): {
+/**
+ * Backend-Governed Model Router:
+ * Enforces economical/fast model by default for demos.
+ * Client CANNOT force expensive models for simple queries.
+ */
+function resolveBackendRoute(
+  requestedTaskType?: string,
+  promptText: string = ''
+): {
   taskType: string;
   primaryModel: string;
   fallbackModel: string;
   reasoning: string;
 } {
-  const taskType = (!requestedTaskType || requestedTaskType === 'auto')
+  const taskType = !requestedTaskType || requestedTaskType === 'auto'
     ? classifyPrompt(promptText)
     : requestedTaskType;
 
-  if (requestedModel && requestedModel !== 'auto') {
-    const fallback = requestedModel === 'gemini-3.8-flash' ? 'gemini-3.1-flash-lite' : 'gemini-3.8-flash';
-    return {
-      taskType,
-      primaryModel: requestedModel,
-      fallbackModel: fallback,
-      reasoning: `Explicit model requested: ${requestedModel}`,
-    };
-  }
-
   switch (taskType) {
-    case 'fast_qa':
-      return {
-        taskType: 'fast_qa',
-        primaryModel: 'gemini-3.1-flash-lite',
-        fallbackModel: 'gemini-3.8-flash',
-        reasoning: 'Fast Q&A: selected gemini-3.1-flash-lite for ultra-fast response',
-      };
     case 'coding':
+      return {
+        taskType: 'coding',
+        primaryModel: HIGHER_REASONING_MODEL,
+        fallbackModel: ECONOMIC_FAST_MODEL,
+        reasoning: 'Coding query: selected higher model for syntax accuracy with fast fallback.',
+      };
+
     case 'complex_reasoning':
+      return {
+        taskType: 'complex_reasoning',
+        primaryModel: HIGHER_REASONING_MODEL,
+        fallbackModel: ECONOMIC_FAST_MODEL,
+        reasoning: 'Complex reasoning detected: selected higher model with fast fallback.',
+      };
+
     case 'math':
+      return {
+        taskType: 'math',
+        primaryModel: HIGHER_REASONING_MODEL,
+        fallbackModel: ECONOMIC_FAST_MODEL,
+        reasoning: 'Math problem: selected higher model with fast fallback.',
+      };
+
     case 'creative':
+      return {
+        taskType: 'creative',
+        primaryModel: ECONOMIC_FAST_MODEL,
+        fallbackModel: HIGHER_REASONING_MODEL,
+        reasoning: 'Creative writing for demo: selected economic fast model.',
+      };
+
+    case 'fast_qa':
     case 'general':
     default:
       return {
-        taskType,
-        primaryModel: 'gemini-3.8-flash',
-        fallbackModel: 'gemini-3.1-flash-lite',
-        reasoning: `${taskType} query: selected primary gemini-3.8-flash with gemini-3.1-flash-lite fallback`,
+        taskType: taskType || 'general',
+        primaryModel: ECONOMIC_FAST_MODEL,
+        fallbackModel: HIGHER_REASONING_MODEL,
+        reasoning: 'Standard demo/general question: selected economic fast model for low latency and zero unnecessary costs.',
       };
   }
 }
 
-// Call Google Gemini via REST API (Edge compatible)
-async function callGemini(
+/**
+ * Calls Google Gemini REST API with edge-compatible Fetch and AbortSignal timeout.
+ */
+async function callGeminiRest(
   model: string,
   messages: ChatMessage[],
   systemInstruction: string | undefined,
@@ -161,7 +264,7 @@ async function callGemini(
   maxTokens?: number
 ): Promise<{ text: string; latencyMs: number }> {
   const startTime = Date.now();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const contents = messages.map((m) => ({
     role: m.role === 'assistant' ? 'model' : m.role,
@@ -170,18 +273,23 @@ async function callGemini(
 
   const payload: Record<string, unknown> = { contents };
 
-  if (systemInstruction) {
+  if (systemInstruction && systemInstruction.trim()) {
     payload.systemInstruction = {
-      parts: [{ text: systemInstruction }],
+      parts: [{ text: systemInstruction.trim() }],
     };
   }
 
   const generationConfig: Record<string, unknown> = {};
-  if (typeof temperature === 'number') generationConfig.temperature = temperature;
-  if (typeof maxTokens === 'number') generationConfig.maxOutputTokens = maxTokens;
-  if (Object.keys(generationConfig).length > 0) {
-    payload.generationConfig = generationConfig;
+  if (typeof temperature === 'number' && !isNaN(temperature)) {
+    generationConfig.temperature = Math.min(Math.max(temperature, 0), 1.5);
   }
+  if (typeof maxTokens === 'number' && !isNaN(maxTokens)) {
+    generationConfig.maxOutputTokens = Math.min(Math.max(Math.floor(maxTokens), 1), MAX_MAX_TOKENS);
+  } else {
+    generationConfig.maxOutputTokens = DEFAULT_MAX_TOKENS;
+  }
+
+  payload.generationConfig = generationConfig;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -190,11 +298,12 @@ async function callGemini(
       'User-Agent': 'aistudio-build',
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini API HTTP ${res.status} (${model}): ${errText}`);
+    const errText = await res.text().catch(() => 'No error body');
+    throw new Error(`Gemini API HTTP ${res.status}: ${errText.slice(0, 300)}`);
   }
 
   const data = (await res.json()) as {
@@ -219,38 +328,50 @@ export default {
 
     // 1. Handle CORS Preflight (OPTIONS)
     if (request.method === 'OPTIONS') {
-      return corsResponse(new Response(null, { status: 204 }), env, reqOrigin);
+      const allowedList = getAllowedOrigins(env);
+      if (reqOrigin && !isOriginAllowed(reqOrigin, allowedList) && !allowedList.includes('*')) {
+        return new Response('CORS origin not allowed', { status: 403 });
+      }
+      return applyCors(new Response(null, { status: 204 }), env, reqOrigin);
     }
 
-    // Optional API Secret Token validation (if configured in env)
-    if (env.API_SECRET_KEY) {
-      const authHeader = request.headers.get('Authorization');
-      const apiKeyHeader = request.headers.get('x-api-key');
-      const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : apiKeyHeader;
-      if (token !== env.API_SECRET_KEY && url.pathname !== '/api/health') {
-        return jsonResponse({ success: false, error: 'Unauthorized: Invalid API secret token' }, 401, env, reqOrigin);
+    // 2. Validate Optional API Secret Key for protected endpoints
+    if (env.API_SECRET_KEY && env.API_SECRET_KEY.trim()) {
+      if (url.pathname !== '/api/health') {
+        const authHeader = request.headers.get('Authorization');
+        const apiKeyHeader = request.headers.get('x-api-key');
+        const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : apiKeyHeader?.trim();
+
+        if (!token || token !== env.API_SECRET_KEY.trim()) {
+          return jsonResponse(
+            { success: false, error: 'Unauthorized: Invalid or missing API secret key.' },
+            401,
+            env,
+            reqOrigin
+          );
+        }
       }
     }
 
-    // 2. GET /api/health
+    // 3. GET /api/health
     if (request.method === 'GET' && url.pathname === '/api/health') {
       const isConfigured = Boolean(env.GEMINI_API_KEY && env.GEMINI_API_KEY.trim().length > 0);
       return jsonResponse(
         {
           status: isConfigured ? 'ok' : 'degraded',
-          service: 'cloudflare-worker-ai-api',
-          version: '1.0.0',
+          service: 'cloudflare-worker-ai-backend',
+          version: '1.1.0',
           timestamp: new Date().toISOString(),
           environment: 'cloudflare-worker',
           providers: {
             gemini: {
               configured: isConfigured,
-              defaultModel: 'gemini-3.8-flash',
-              fallbackModel: 'gemini-3.1-flash-lite',
+              fastModel: ECONOMIC_FAST_MODEL,
+              higherModel: HIGHER_REASONING_MODEL,
             },
           },
-          supportedModels: ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
-          supportedTaskTypes: ['auto', 'general', 'coding', 'complex_reasoning', 'fast_qa', 'creative', 'math'],
+          supportedModels: ALLOWED_MODELS,
+          costOptimization: 'economic-first (gemini-3.1-flash-lite default)',
         },
         isConfigured ? 200 : 503,
         env,
@@ -258,25 +379,27 @@ export default {
       );
     }
 
-    // 3. GET /api/models
+    // 4. GET /api/models
     if (request.method === 'GET' && url.pathname === '/api/models') {
       return jsonResponse(
         {
-          primaryProvider: 'gemini',
-          defaultModel: 'gemini-3.8-flash',
-          fallbackModel: 'gemini-3.1-flash-lite',
+          defaultModel: ECONOMIC_FAST_MODEL,
+          higherModel: HIGHER_REASONING_MODEL,
           availableModels: [
             {
-              id: 'gemini-3.8-flash',
-              name: 'Gemini 3.8 Flash',
-              description: 'Fast, high-reasoning flagship model for general, code, logic, and math.',
+              id: ECONOMIC_FAST_MODEL,
+              name: 'Gemini 3.1 Flash Lite',
+              role: 'Default Economic & Fast Model',
+              description: 'Ultra-fast, low-cost model used for demo interactions, general chat, Q&A, and greetings.',
             },
             {
-              id: 'gemini-3.1-flash-lite',
-              name: 'Gemini 3.1 Flash Lite',
-              description: 'Cost-efficient, ultra-low latency model for simple queries and default fallback.',
+              id: HIGHER_REASONING_MODEL,
+              name: 'Gemini 3.8 Flash',
+              role: 'Higher Reasoning Model',
+              description: 'Activated automatically for coding queries, math, or complex multi-step reasoning.',
             },
           ],
+          routingMode: 'backend-governed',
         },
         200,
         env,
@@ -284,14 +407,14 @@ export default {
       );
     }
 
-    // 4. POST /api/chat
+    // 5. POST /api/chat
     if (request.method === 'POST' && url.pathname === '/api/chat') {
-      const apiKey = env.GEMINI_API_KEY;
+      const apiKey = env.GEMINI_API_KEY?.trim();
       if (!apiKey) {
         return jsonResponse(
           {
             success: false,
-            error: 'Server configuration error: GEMINI_API_KEY secret is not set in Cloudflare Worker environment.',
+            error: 'Server error: GEMINI_API_KEY secret is not set in Cloudflare Worker configuration.',
           },
           500,
           env,
@@ -306,23 +429,65 @@ export default {
         return jsonResponse({ success: false, error: 'Invalid JSON body in request.' }, 400, env, reqOrigin);
       }
 
-      // Format messages
+      // Input extraction & validation
       const messages: ChatMessage[] = [];
+
       if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) {
-        messages.push(...body.messages);
-      } else if (body.prompt && body.prompt.trim()) {
+        if (body.messages.length > MAX_MESSAGES_COUNT) {
+          return jsonResponse(
+            { success: false, error: `Exceeded maximum message count of ${MAX_MESSAGES_COUNT}.` },
+            400,
+            env,
+            reqOrigin
+          );
+        }
+        for (const msg of body.messages) {
+          if (!msg || typeof msg.content !== 'string' || !msg.content.trim()) continue;
+          if (msg.content.length > MAX_MESSAGE_CONTENT_LENGTH) {
+            return jsonResponse(
+              { success: false, error: `Individual message length exceeds ${MAX_MESSAGE_CONTENT_LENGTH} characters.` },
+              400,
+              env,
+              reqOrigin
+            );
+          }
+          messages.push({
+            role: msg.role === 'model' || msg.role === 'assistant' ? 'model' : 'user',
+            content: msg.content.trim(),
+          });
+        }
+      } else if (body.prompt && typeof body.prompt === 'string' && body.prompt.trim()) {
+        if (body.prompt.length > MAX_PROMPT_LENGTH) {
+          return jsonResponse(
+            { success: false, error: `Prompt length exceeds maximum allowed limit (${MAX_PROMPT_LENGTH} characters).` },
+            400,
+            env,
+            reqOrigin
+          );
+        }
         messages.push({ role: 'user', content: body.prompt.trim() });
       } else {
         return jsonResponse(
-          { success: false, error: 'Missing required field: "prompt" or "messages" array.' },
+          { success: false, error: 'Missing required field: "prompt" string or "messages" array.' },
           400,
           env,
           reqOrigin
         );
       }
 
-      const latestPrompt = [...messages].reverse().find((m) => m.role === 'user')?.content || body.prompt || '';
-      const route = routeModel(body.model, body.taskType, latestPrompt);
+      // System instruction limit
+      let systemInstruction = body.systemInstruction;
+      if (systemInstruction && typeof systemInstruction === 'string') {
+        if (systemInstruction.length > MAX_SYSTEM_INSTRUCTION_LENGTH) {
+          systemInstruction = systemInstruction.slice(0, MAX_SYSTEM_INSTRUCTION_LENGTH);
+        }
+      } else {
+        systemInstruction = undefined;
+      }
+
+      // Backend-governed model routing (prevents clients from forcing expensive models on simple questions)
+      const latestPrompt = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+      const route = resolveBackendRoute(body.taskType, latestPrompt);
 
       let finalResultText = '';
       let finalModelUsed = route.primaryModel;
@@ -330,12 +495,12 @@ export default {
       let fallbackReason: string | undefined = undefined;
       const startTime = Date.now();
 
-      // Primary model call
+      // Primary Model Call
       try {
-        const primaryRes = await callGemini(
+        const primaryRes = await callGeminiRest(
           route.primaryModel,
           messages,
-          body.systemInstruction,
+          systemInstruction,
           apiKey,
           body.temperature,
           body.maxTokens
@@ -344,17 +509,17 @@ export default {
         finalModelUsed = route.primaryModel;
       } catch (primaryErr: unknown) {
         const pErr = primaryErr as Error;
-        console.warn(`Primary model ${route.primaryModel} failed: ${pErr.message}. Trying fallback ${route.fallbackModel}...`);
+        console.warn(`[AI Backend] Primary model (${route.primaryModel}) failed: ${pErr.message}. Executing fallback to ${route.fallbackModel}...`);
 
         fallbackTriggered = true;
-        fallbackReason = `Primary model ${route.primaryModel} failed: ${pErr.message}`;
+        fallbackReason = `Primary model (${route.primaryModel}) unavailable. Reattempted with ${route.fallbackModel}.`;
 
-        // Fallback model call
+        // Fallback Model Call
         try {
-          const fallbackRes = await callGemini(
+          const fallbackRes = await callGeminiRest(
             route.fallbackModel,
             messages,
-            body.systemInstruction,
+            systemInstruction,
             apiKey,
             body.temperature,
             body.maxTokens
@@ -363,10 +528,11 @@ export default {
           finalModelUsed = route.fallbackModel;
         } catch (fallbackErr: unknown) {
           const fErr = fallbackErr as Error;
+          console.error(`[AI Backend] Fallback model (${route.fallbackModel}) also failed: ${fErr.message}`);
           return jsonResponse(
             {
               success: false,
-              error: `All AI models failed. Primary (${route.primaryModel}): ${pErr.message}. Fallback (${route.fallbackModel}): ${fErr.message}`,
+              error: 'AI service temporarily unavailable. Please try again in a few moments.',
             },
             502,
             env,
@@ -384,12 +550,10 @@ export default {
           metadata: {
             provider: 'gemini',
             model: finalModelUsed,
-            requestedModel: body.model,
             taskType: route.taskType,
             fallbackTriggered,
-            fallbackReason,
+            ...(fallbackTriggered ? { fallbackReason } : {}),
             latencyMs: totalLatency,
-            timestamp: new Date().toISOString(),
           },
         },
         200,
@@ -398,7 +562,7 @@ export default {
       );
     }
 
-    // Default 404
+    // 6. Default 404
     return jsonResponse(
       {
         success: false,
