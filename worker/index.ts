@@ -30,9 +30,9 @@ export interface ChatRequestBody {
 }
 
 // Allowed models allowlist (Backend-governed)
-const ECONOMIC_FAST_MODEL = 'gemini-3.5-flash-lite';
-const HIGHER_REASONING_MODEL = 'gemini-3.8-flash';
-const ALLOWED_MODELS = [ECONOMIC_FAST_MODEL, HIGHER_REASONING_MODEL];
+const ECONOMIC_FAST_MODEL = 'gemini-3.1-flash-lite';
+const HIGHER_REASONING_MODEL = ECONOMIC_FAST_MODEL;
+const ALLOWED_MODELS = [ECONOMIC_FAST_MODEL];
 
 // Default allowed origins for GitHub Pages and local development
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -207,49 +207,15 @@ function resolveBackendRoute(
     ? classifyPrompt(promptText)
     : requestedTaskType;
 
-  switch (taskType) {
-    case 'coding':
-      return {
-        taskType: 'coding',
-        primaryModel: HIGHER_REASONING_MODEL,
-        fallbackModel: ECONOMIC_FAST_MODEL,
-        reasoning: 'Coding query: selected higher model for syntax accuracy with fast fallback.',
-      };
-
-    case 'complex_reasoning':
-      return {
-        taskType: 'complex_reasoning',
-        primaryModel: HIGHER_REASONING_MODEL,
-        fallbackModel: ECONOMIC_FAST_MODEL,
-        reasoning: 'Complex reasoning detected: selected higher model with fast fallback.',
-      };
-
-    case 'math':
-      return {
-        taskType: 'math',
-        primaryModel: HIGHER_REASONING_MODEL,
-        fallbackModel: ECONOMIC_FAST_MODEL,
-        reasoning: 'Math problem: selected higher model with fast fallback.',
-      };
-
-    case 'creative':
-      return {
-        taskType: 'creative',
-        primaryModel: ECONOMIC_FAST_MODEL,
-        fallbackModel: HIGHER_REASONING_MODEL,
-        reasoning: 'Creative writing for demo: selected economic fast model.',
-      };
-
-    case 'fast_qa':
-    case 'general':
-    default:
-      return {
-        taskType: taskType || 'general',
-        primaryModel: ECONOMIC_FAST_MODEL,
-        fallbackModel: HIGHER_REASONING_MODEL,
-        reasoning: 'Standard demo/general question: selected economic fast model for low latency and zero unnecessary costs.',
-      };
-  }
+  // Mascoticas IA uses only Gemini 3.1 Flash-Lite.
+  // The task classifier remains useful for logging/analytics, but no task
+  // is routed to a more expensive model.
+  return {
+    taskType: taskType || 'general',
+    primaryModel: ECONOMIC_FAST_MODEL,
+    fallbackModel: ECONOMIC_FAST_MODEL,
+    reasoning: 'Mascoticas IA: Gemini 3.1 Flash-Lite only for all AI queries.',
+  };
 }
 
 /**
@@ -371,7 +337,7 @@ export default {
             },
           },
           supportedModels: ALLOWED_MODELS,
-          costOptimization: 'economic-first (gemini-3.1-flash-lite default)',
+          costOptimization: 'gemini-3.1-flash-lite only',
         },
         isConfigured ? 200 : 503,
         env,
